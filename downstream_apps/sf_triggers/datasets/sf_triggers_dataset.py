@@ -52,6 +52,13 @@ class FlareDSDataset(HelioNetCDFDataset):
             (e.g., ``"15min"``). Unmatched entries are dropped.
         ds_match_direction: Merge direction passed to ``pd.merge_asof``. Use ``"forward"``
             for causal prediction (predict flares from prior solar state).
+        ds_val_fraction: Fraction of DS *events* (not Surya timesteps) held out for
+            validation. Splitting at the event level, rather than relying on which Surya
+            calendar-month file a timestep happens to fall in, matters when the DS catalog
+            is small and calendar-concentrated: a train/val split by month can easily leave
+            zero events in validation.
+        ds_split_seed: Seed for the event-level train/val split, so both the ``phase="train"``
+            and ``phase="val"`` instances agree on a disjoint partition without communicating.
         mask_dir: Directory of SHARP bitmap FITS masks (one per flare event), named
             ``hmi.sharp_720s.<HARPNUM>.<YYYYMMDD>_<HHMMSS>_TAI.bitmap.fits``.
         mask_time_tolerance: Maximum allowed gap between a catalog row's event timestamp and
@@ -72,6 +79,8 @@ class FlareDSDataset(HelioNetCDFDataset):
         ds_time_column: str | None = None,
         ds_time_tolerance: str | None = None,
         ds_match_direction: Literal["forward", "backward", "nearest"] = "forward",
+        ds_val_fraction: float = 0.2,
+        ds_split_seed: int = 42,
         mask_dir: str | None = None,
         mask_time_tolerance: str = "10min",
         # All HelioNetCDFDataset parameters (index_path, scalers, channels, s3_*, etc.)
@@ -99,6 +108,19 @@ class FlareDSDataset(HelioNetCDFDataset):
             self.ds_index[ds_time_column]
         ).values.astype("datetime64[ns]")
         self.ds_index.sort_values("ds_index", inplace=True)
+
+        # Split DS *events* into train/val before matching against the Surya index. A
+        # split by calendar month (i.e. train_data_path vs valid_data_path) is meaningless
+        # for a small, calendar-concentrated catalog like this one -- it can easily leave
+        # zero events in whichever split holds the reserved months. Seeded, so the
+        # phase="train" and phase="val" instances agree on a disjoint partition.
+        n_events = len(self.ds_index)
+        rng = np.random.RandomState(ds_split_seed)
+        shuffled = rng.permutation(n_events)
+        n_val = max(1, round(n_events * ds_val_fraction))
+        val_positions = set(shuffled[:n_val].tolist())
+        positions = val_positions if self.phase == "val" else set(range(n_events)) - val_positions
+        self.ds_index = self.ds_index.iloc[sorted(positions)]
 
         # Create Surya valid indices and find closest match to DS index
         self.df_valid_indices = pd.DataFrame(

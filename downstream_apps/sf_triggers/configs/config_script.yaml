@@ -33,7 +33,13 @@ job_id: solar_flare_forecasting
 data:
   # -- Paths (relative to this file's directory) --
   train_data_path: ../../../data/indices/surya_aws_s3_train.csv
-  valid_data_path: ../../../data/indices/surya_aws_s3_val.csv
+  # Deliberately the same file as train_data_path: this app's train/val split happens at
+  # the flare-*event* level (see ds_val_fraction below), not by which Surya calendar-month
+  # file a timestep falls in. surya_aws_s3_val.csv only covers January across all years, so
+  # a small, calendar-concentrated flare catalog like flare_index_path can end up with zero
+  # events anywhere near that window -- pointing this at the full-year index instead lets
+  # the event split, not an arbitrary reserved month, decide what's held out.
+  valid_data_path: ../../../data/indices/surya_aws_s3_train.csv
   scalers_path: ../assets/scalers.yaml
 
   # -- Input channels and temporal sampling --
@@ -47,6 +53,8 @@ data:
   ds_time_column: start_time      # Column in the flare catalog used as the event timestamp
   ds_time_tolerance: 4d           # Max allowed gap between catalog and Surya timestamps
   ds_match_direction: forward     # "forward": use solar state *before* the flare (causal)
+  ds_val_fraction: 0.2            # Fraction of DS events (not Surya timesteps) held out for val
+  ds_split_seed: 42               # Seed for the event-level train/val split
 
   # -- Flare-region mask alignment (mask file → flare catalog row) --
   mask_dir: /home/jovyan/scratch_space/adithya_hn/mask_bitmaps

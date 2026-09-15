@@ -43,6 +43,10 @@ class FlareDataConfig(DataConfig):
     ds_time_tolerance: str = "4d"
     # "forward" uses the solar state *before* the flare (causal prediction).
     ds_match_direction: str = "forward"
+    # Fraction of DS events (not Surya timesteps) held out for validation.
+    ds_val_fraction: float = 0.2
+    # Seed for the event-level train/val split.
+    ds_split_seed: int = 42
     # Directory of SHARP bitmap FITS masks, one per flare event.
     mask_dir: str = ""
     # Max allowed gap when matching catalog rows to mask-file timestamps.
