@@ -132,7 +132,9 @@ class FlareDSDataset(HelioNetCDFDataset):
             When ``return_surya_stack=True``, also includes all keys from
             ``HelioNetCDFDataset.__getitem__`` (ts, time_delta_input, lead_time_delta, etc.).
         """
+        # open file 
         sample = super().__getitem__(idx=idx) if self.return_surya_stack else {}
-        sample["forecast"] = self.df_valid_indices.iloc[idx]["normalized_intensity"].astype(np.float32)
+        sample["forecast"] = self.df_valid_indices.iloc[idx]["normalized_intensity"].astype(np.float32) #repalce the with spatialmask image
+        #sample["flare_mask"]=
         sample["ds_index"] = self.df_valid_indices["ds_index"].iloc[idx].isoformat()
         return sample
