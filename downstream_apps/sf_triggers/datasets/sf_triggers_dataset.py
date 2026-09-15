@@ -1,13 +1,41 @@
+import re
+from pathlib import Path
+from typing import Literal
+
 import numpy as np
 import pandas as pd
-from typing import Callable, Literal
+from astropy.io import fits
+
 from workshop_infrastructure.datasets.helio import HelioNetCDFDataset
+
+# SHARP bitmap filenames are the only place the HARP number and observation timestamp
+# are recorded -- there is no sidecar index mapping catalog rows to mask files.
+_MASK_FILENAME_RE = re.compile(
+    r"hmi\.sharp_720s\.(?P<harp>\d+)\.(?P<date>\d{8})_(?P<time>\d{6})_TAI\.bitmap\.fits$"
+)
+
+
+def _scan_mask_dir(mask_dir: str) -> pd.DataFrame:
+    """Parse HARP number + timestamp out of every SHARP bitmap filename in ``mask_dir``."""
+    rows = []
+    for path in sorted(Path(mask_dir).glob("*.bitmap.fits")):
+        m = _MASK_FILENAME_RE.match(path.name)
+        if m is None:
+            continue
+        ts = pd.Timestamp(
+            f"{m['date'][:4]}-{m['date'][4:6]}-{m['date'][6:]}"
+            f"T{m['time'][:2]}:{m['time'][2:4]}:{m['time'][4:]}"
+        )
+        rows.append({"harp": int(m["harp"]), "mask_ts": ts, "mask_path": str(path)})
+    if not rows:
+        raise ValueError(f"No SHARP bitmap files found in {mask_dir}")
+    return pd.DataFrame(rows).sort_values("mask_ts")
 
 
 class FlareDSDataset(HelioNetCDFDataset):
     """
     Template child class of HelioNetCDFDataset showing how to build a downstream dataset.
-    Extends the base class with a flare intensity label aligned to the Surya index.
+    Extends the base class with a flare-region spatial mask label aligned to the Surya index.
 
     All ``HelioNetCDFDataset`` keyword arguments (``index_path``, ``scalers``, ``channels``,
     ``s3_cache_dir``, etc.) are accepted via ``**kwargs`` and forwarded to the base class.
@@ -16,23 +44,23 @@ class FlareDSDataset(HelioNetCDFDataset):
 
     Additional Args:
         return_surya_stack: If True (default), include the Surya image stack in the returned dict.
-            Set to False to return only the flare intensity label (useful for label inspection).
+            Set to False to return only the flare mask label (useful for label inspection).
         max_number_of_samples: Cap the dataset length at this value. Useful for quick experiments.
-        label_transform: Optional callable applied to the ``intensity`` column of the flare index
-            to produce the ``normalized_intensity`` label. Signature:
-            ``(series: pd.Series) -> pd.Series``.  If ``None``, the raw intensity values are
-            used as-is. Define this at the call site (e.g., in ``build_datasets()``) to keep
-            normalization logic out of the dataset class.
-        ds_flare_index_path: Path to the downstream flare intensity CSV index.
+        ds_flare_index_path: Path to the downstream flare catalog CSV index.
         ds_time_column: Column name in the flare index to use as the event timestamp.
         ds_time_tolerance: Maximum allowed time offset when matching Surya and DS indices
             (e.g., ``"15min"``). Unmatched entries are dropped.
         ds_match_direction: Merge direction passed to ``pd.merge_asof``. Use ``"forward"``
             for causal prediction (predict flares from prior solar state).
+        mask_dir: Directory of SHARP bitmap FITS masks (one per flare event), named
+            ``hmi.sharp_720s.<HARPNUM>.<YYYYMMDD>_<HHMMSS>_TAI.bitmap.fits``.
+        mask_time_tolerance: Maximum allowed gap between a catalog row's event timestamp and
+            a mask file's embedded timestamp when matching the two (e.g., ``"10min"``).
 
     Raises:
-        ValueError: If ``ds_flare_index_path`` is not provided, or if no overlap exists
-            between the Surya and DS indices within the specified tolerance.
+        ValueError: If ``ds_flare_index_path`` or ``mask_dir`` is not provided, if no overlap
+            exists between the Surya and DS indices within the specified tolerance, or if any
+            catalog row has no matching mask file within ``mask_time_tolerance``.
     """
 
     def __init__(
@@ -40,16 +68,19 @@ class FlareDSDataset(HelioNetCDFDataset):
         # Downstream-specific parameters
         return_surya_stack: bool = True,
         max_number_of_samples: int | None = None,
-        label_transform: Callable[[pd.Series], pd.Series] | None = None,
         ds_flare_index_path: str | None = None,
         ds_time_column: str | None = None,
         ds_time_tolerance: str | None = None,
         ds_match_direction: Literal["forward", "backward", "nearest"] = "forward",
+        mask_dir: str | None = None,
+        mask_time_tolerance: str = "10min",
         # All HelioNetCDFDataset parameters (index_path, scalers, channels, s3_*, etc.)
         **kwargs,
     ):
         if ds_match_direction not in ["forward", "backward", "nearest"]:
             raise ValueError("ds_match_direction must be one of 'forward', 'backward', or 'nearest'")
+        if mask_dir is None:
+            raise ValueError("mask_dir must be provided for FlareDSDataset")
 
         # load_forecast_frames defaults to False here: flare forecasting supplies its
         # own labels, so future Surya frames never need to be fetched from disk/S3.
@@ -68,12 +99,6 @@ class FlareDSDataset(HelioNetCDFDataset):
             self.ds_index[ds_time_column]
         ).values.astype("datetime64[ns]")
         self.ds_index.sort_values("ds_index", inplace=True)
-
-        # Apply label transform if provided; otherwise use raw intensity values.
-        if label_transform is not None:
-            self.ds_index["normalized_intensity"] = label_transform(self.ds_index["intensity"])
-        else:
-            self.ds_index["normalized_intensity"] = self.ds_index["intensity"]
 
         # Create Surya valid indices and find closest match to DS index
         self.df_valid_indices = pd.DataFrame(
@@ -105,6 +130,25 @@ class FlareDSDataset(HelioNetCDFDataset):
             if len(self.df_valid_indices) == 0:
                 raise ValueError("No intersection between Surya and DS indices")
 
+        # Match each catalog row to its flare-region mask file by nearest timestamp.
+        # self.df_valid_indices is sorted ascending by "ds_index" at this point, which
+        # merge_asof requires.
+        mask_index = _scan_mask_dir(mask_dir)
+        self.df_valid_indices = pd.merge_asof(
+            self.df_valid_indices,
+            mask_index,
+            left_on="ds_index",
+            right_on="mask_ts",
+            direction="nearest",
+            tolerance=pd.Timedelta(mask_time_tolerance),
+        )
+        unmatched = self.df_valid_indices["mask_path"].isna()
+        if unmatched.any():
+            bad = self.df_valid_indices.loc[unmatched, "ds_index"].tolist()
+            raise ValueError(
+                f"No mask file within {mask_time_tolerance} for ds_index timestamps: {bad}"
+            )
+
         # Override valid indices variables to reflect matches between Surya and DS
         self.valid_indices = [
             pd.Timestamp(date) for date in self.df_valid_indices["valid_indices"]
@@ -120,6 +164,14 @@ class FlareDSDataset(HelioNetCDFDataset):
     def __len__(self):
         return self.adjusted_length
 
+    def _load_mask(self, path: str) -> np.ndarray:
+        """Load a SHARP bitmap FITS file as a binary (1, H, W) float32 mask."""
+        with fits.open(path) as hdul:
+            data = np.asarray(hdul[0].data)
+        mask = np.nan_to_num(data, nan=0.0)
+        mask = (mask > 0).astype(np.float32)  # binarize defensively
+        return mask[None, :, :]  # (1, H, W) -- channel-first, matches ts/forecast convention
+
     def __getitem__(self, idx: int) -> dict:
         """
         Args:
@@ -127,14 +179,13 @@ class FlareDSDataset(HelioNetCDFDataset):
 
         Returns:
             Dictionary containing:
-                forecast (np.float32): Normalized log10 flare intensity label.
+                forecast (np.float32): Binary flare-region mask, shape (1, H, W).
                 ds_index (str): ISO-format timestamp from the flare index.
             When ``return_surya_stack=True``, also includes all keys from
             ``HelioNetCDFDataset.__getitem__`` (ts, time_delta_input, lead_time_delta, etc.).
         """
-        # open file 
         sample = super().__getitem__(idx=idx) if self.return_surya_stack else {}
-        sample["forecast"] = self.df_valid_indices.iloc[idx]["normalized_intensity"].astype(np.float32) #repalce the with spatialmask image
-        #sample["flare_mask"]=
+        mask_path = self.df_valid_indices.iloc[idx]["mask_path"]
+        sample["forecast"] = self._load_mask(mask_path)
         sample["ds_index"] = self.df_valid_indices["ds_index"].iloc[idx].isoformat()
         return sample

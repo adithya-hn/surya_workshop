@@ -32,7 +32,7 @@ from workshop_infrastructure.configs import (  # re-exported for convenience
 class FlareDataConfig(DataConfig):
     """DataConfig plus the flare-catalog alignment settings used by ``FlareDSDataset``.
 
-    These four keys are what makes this app's ``data:`` section different from any other
+    These keys are what makes this app's ``data:`` section different from any other
     downstream task's. Swap them for your own when you fork.
     """
     # Path to the label catalog (relative paths resolve against the config file's dir).
@@ -43,10 +43,18 @@ class FlareDataConfig(DataConfig):
     ds_time_tolerance: str = "4d"
     # "forward" uses the solar state *before* the flare (causal prediction).
     ds_match_direction: str = "forward"
+    # Directory of SHARP bitmap FITS masks, one per flare event.
+    mask_dir: str = ""
+    # Max allowed gap when matching catalog rows to mask-file timestamps.
+    mask_time_tolerance: str = "10min"
 
-    # flare_index_path is a path, so it must join the base class's list to get the same
-    # relative-to-the-config-file resolution. Extend this whenever you add a path field.
-    PATH_FIELDS: ClassVar[tuple[str, ...]] = DataConfig.PATH_FIELDS + ("flare_index_path",)
+    # flare_index_path and mask_dir are paths, so they must join the base class's list to
+    # get the same relative-to-the-config-file resolution. Extend this whenever you add a
+    # path field.
+    PATH_FIELDS: ClassVar[tuple[str, ...]] = DataConfig.PATH_FIELDS + (
+        "flare_index_path",
+        "mask_dir",
+    )
 
 
 # The app's entry point. Identical to load_config() except that the data: section is

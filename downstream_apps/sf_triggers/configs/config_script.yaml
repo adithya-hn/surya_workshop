@@ -48,6 +48,10 @@ data:
   ds_time_tolerance: 4d           # Max allowed gap between catalog and Surya timestamps
   ds_match_direction: forward     # "forward": use solar state *before* the flare (causal)
 
+  # -- Flare-region mask alignment (mask file → flare catalog row) --
+  mask_dir: /home/jovyan/scratch_space/adithya_hn/mask_bitmaps
+  mask_time_tolerance: 10min      # Max allowed gap between catalog row and mask timestamps
+
   # -- Local data (only needed when the index contains relative local paths) --
   # sdo_data_root_path: /path/to/sdo   # Prepended to relative local paths; ignored for s3://
 
@@ -208,5 +212,5 @@ output:
 # Logging
 # -----------------------------------------------------------------------------
 logging:
-  wandb_project: template_flare_regression
+  wandb_project: sf_triggers
   wandb_entity: null      # WandB team/org name; null to log to your personal account
