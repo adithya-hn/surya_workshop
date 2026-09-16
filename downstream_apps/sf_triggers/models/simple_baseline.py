@@ -66,11 +66,15 @@ class RegressionFlareModel(nn.Module):
         W - Width
         """
         x = x["ts"]
+        B, C, T, H, W = x.shape
 
-        # Collapse input stack spatially and take absolute value for strictly positive flare fluxes
-        x = x.abs().mean(dim=[3, 4])
+        # Take absolute value for strictly positive flare fluxes; predict per-pixel
+        # instead of spatially pooling, so the output matches the (B, 1, H, W) mask target.
+        x = x.abs()
 
         # Rearrange in preparation for linear layer
-        x = rearrange(x, "b c t -> b (c t)")
+        x = rearrange(x, "b c t h w -> (b h w) (c t)")
+        x = self.linear(x)
+        x = rearrange(x, "(b h w) c -> b c h w", b=B, h=H, w=W)
 
-        return self.linear(x)
+        return x
