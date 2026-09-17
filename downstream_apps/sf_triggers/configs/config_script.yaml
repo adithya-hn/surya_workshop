@@ -152,11 +152,12 @@ model:
   # -- LoRA adapters --
   use_lora: true
   lora_config:
-    r: 8
+    r: 2
     lora_alpha: 8
     lora_dropout: 0.1
     bias: none
-    target_modules: [q_proj, v_proj, k_proj, out_proj, fc1, fc2]
+    target_modules: [fc1, fc2, attn.qkv, attn.proj]
+    
 
 
 # -----------------------------------------------------------------------------
@@ -164,7 +165,7 @@ model:
 # -----------------------------------------------------------------------------
 training:
   learning_rate: 0.0001
-  batch_size: 2         # Per-device batch size under DDP
+  batch_size: 1         # Per-device batch size under DDP
   max_epochs: 20        # Can be overridden with --max-epochs at the CLI
   num_workers: 8        # DataLoader worker processes per device (use 0 to debug in-process)
 

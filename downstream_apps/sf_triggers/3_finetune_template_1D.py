@@ -128,6 +128,10 @@ def build_datasets(cfg: TrainingConfig, scalers) -> Tuple[DataLoader, DataLoader
         ds_time_column=cfg.data.ds_time_column,
         ds_time_tolerance=cfg.data.ds_time_tolerance,
         ds_match_direction=cfg.data.ds_match_direction,
+        ds_val_fraction=cfg.data.ds_val_fraction,
+        ds_split_seed=cfg.data.ds_split_seed,
+        mask_dir=cfg.data.mask_dir,
+        mask_time_tolerance=cfg.data.mask_time_tolerance,
     )
 
 
@@ -157,10 +161,10 @@ def build_model(cfg: TrainingConfig, scalers, train_baseline: bool = False) -> L
         preprocess_fn = partial(destandardize_channels, channel_order=cfg.data.channels, scalers=scalers)
         return FlareLightningModule(model, metrics, lr=cfg.learning_rate, batch_size=cfg.batch_size, preprocess_fn=preprocess_fn)
     else:
-        from workshop_infrastructure.models.finetune_models import HelioSpectformer1D
-        model = HelioSpectformer1D.from_config(
+        from workshop_infrastructure.models.finetune_models import HelioSpectformer2D
+        model = HelioSpectformer2D.from_config(
             cfg.model,
-            num_outputs=1,
+            ft_out_chans=1,
             dtype=cfg.dtype,
             use_latitude_in_learned_flow=cfg.use_latitude_in_learned_flow,
         )
@@ -172,9 +176,8 @@ def build_model(cfg: TrainingConfig, scalers, train_baseline: bool = False) -> L
         #   use_lora: false, freeze_backbone: false -> full fine-tuning
         #
         # freeze_backbone is ignored when use_lora is true: PEFT freezes every
-        # parameter, then re-enables the adapters and every head_* module.
-        # apply_peft_lora() finds the head by the head_ naming convention, so a
-        # custom head layer must carry that prefix or it is silently frozen.
+        # parameter, then apply_peft_lora() re-enables the adapters plus every
+        # parameter outside backbone.* (the fine-tuning head).
         if cfg.model.freeze_backbone:
             for name, param in model.named_parameters():
                 if name.startswith("backbone."):

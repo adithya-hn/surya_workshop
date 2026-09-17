@@ -255,6 +255,18 @@ def apply_peft_lora(
 
     model = get_peft_model(model, peft_config)
 
+    # get_peft_model() freezes every parameter except the LoRA adapters it just added.
+    # Anything outside the backbone -- the pooling head, penultimate linear layer, and
+    # unembed/decoder for HelioSpectformer1D; the decoder for HelioSpectformer2D -- is the
+    # fine-tuning head and must stay trainable, or the adapters end up fitting a frozen,
+    # randomly-initialized readout.
+    for name, param in model.named_parameters():
+        if "lora_" in name:
+            continue
+        original_name = name.split("base_model.model.", 1)[-1]
+        if not original_name.startswith("backbone."):
+            param.requires_grad = True
+
     # Log the number of trainable parameters
     trainable_params = 0
     all_param = 0
