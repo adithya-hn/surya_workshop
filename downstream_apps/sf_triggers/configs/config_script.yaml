@@ -153,7 +153,15 @@ model:
   lora_config:
     r: 2
     lora_alpha: 8
-    lora_dropout: 0.1
+    # 0.0 rather than the usual 0.1. PEFT builds nn.Dropout when p > 0 and nn.Identity when
+    # p == 0, so p > 0 allocates an output tensor plus a bool mask the same shape as its
+    # input -- on fc2 that input is (1, 65536, 5120). Measured, though, the saving is small
+    # (~0.5% of peak): under gradient checkpointing those tensors are transient and do not
+    # coexist with the actual peak. Kept at 0.0 because it is free and because at r=2 on a
+    # handful of samples the regularization is not doing useful work -- not because it is a
+    # significant memory lever. The real levers are training.precision below and the two
+    # helper calls in build_model().
+    lora_dropout: 0.0
     bias: none
     target_modules: [fc1, fc2, attn.qkv, attn.proj]
     
@@ -201,7 +209,27 @@ training:
   rollout_steps: 0
   drop_hmi_probability: 0.0
   use_latitude_in_learned_flow: false
-  dtype: float32        # Options: float32 | bfloat16
+  dtype: float32        # Options: float32 | bfloat16. NOTE: inert -- the backbone accepts
+                        # this and drops it. `precision` below is the real control.
+
+  # Mixed-precision mode, passed to lightning.Trainer. The primary memory lever for this
+  # app's 2D head, and on pre-Ampere hardware a large speed lever too.
+  #   16-mixed    fp16 autocast + fp32 master weights + GradScaler. Correct for T4/V100
+  #               (SM70/75), which have native fp16 tensor cores but EMULATE bf16.
+  #               Measured on a T4 at this model's MLP GEMM shape (16384x1280x5120):
+  #               9.3 ms fp16, 56.8 ms fp32, 90.1 ms bf16 -- bf16 is slower than plain
+  #               fp32 on this hardware, so it costs throughput to save memory.
+  #   bf16-mixed  Prefer on A100/H100 (SM80+): native there, and no GradScaler needed.
+  #   32-true     No autocast. Does not fit the 2D head at 4096x4096 on 16 GB.
+  #   bf16-true   Do not use. Lightning casts the module before building the optimizer, so
+  #               Adam's second moment lives in bf16 and stops accumulating; a parameter of
+  #               magnitude 1.0 at lr 1e-4 measurably does not move at all.
+  precision: 16-mixed
+
+  # Effective batch = batch_size * accumulate_grad_batches, at the memory cost of
+  # batch_size alone. batch_size is pinned at 1 for the 2D head at 4096x4096, so this is
+  # the only remaining way to raise it.
+  accumulate_grad_batches: 1
 
 
 # -----------------------------------------------------------------------------
