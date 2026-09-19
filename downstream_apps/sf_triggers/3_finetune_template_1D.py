@@ -161,7 +161,7 @@ def build_model(cfg: TrainingConfig, scalers, train_baseline: bool = False) -> L
 
     if train_baseline:
         from functools import partial
-        from downstream_apps.template.models.simple_baseline import (
+        from downstream_apps.sf_triggers.models.simple_baseline import (
             RegressionFlareModel,
             destandardize_channels,
         )

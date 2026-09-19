@@ -136,6 +136,99 @@ Two properties matter when editing configs:
 
 CLI overrides are deliberately limited to what varies between runs of one config: `--max-epochs`, `--batch-size`, `--s3-cache-dir`, `--deterministic {false,warn,true}`, plus the `--no-wandb` and `--train_baseline` toggles.
 
+### GPU Memory
+
+There is no batch-size knob left for the 2D apps: at `img_size 4096` / `patch_size 16` a single
+sample is already 65,536 tokens. Peak memory is set by the *transient* cost of one
+gradient-checkpoint recomputation in the backward pass, which is invisible in Lightning's
+"total estimated model params size" line and in the forward pass. The `2_*` notebooks carry a
+`probe_step_memory()` cell that runs one real forward+backward and reports
+`max_memory_allocated()` — measure with it rather than reasoning about it.
+
+**1D vs 2D is the dominant factor.** `HelioSpectformer1D` with `pooling: class_token` returns
+`tokens[:, [0], :]` (`helio_spectformer.py:293`), dropping the token grid before the head.
+`HelioSpectformer2D` keeps the full `(B, 65536, 1280)` grid and feeds it to a `LinearDecoder`
+that reaches 4096×4096. A config that fits comfortably for the template can OOM a 16 GB card
+in the 2D app unchanged.
+
+**`training.precision` is the only precision control.** `training.dtype` is accepted and
+dropped on the floor (`helio_spectformer.py:80` documents it as unused) — do not reach for it.
+`VALID_PRECISION` in `configs.py` carries the full rationale; the short version:
+- **Default `16-mixed`, not `bf16-mixed`.** Below SM80, bf16 is *emulated*:
+  `torch.cuda.is_bf16_supported(including_emulation=False)` returns `False` on a T4. Measured
+  there at this model's MLP GEMM shape (16384×1280×5120): **fp16 9.3 ms, fp32 56.8 ms, bf16
+  90.1 ms** — bf16 is slower than no mixed precision at all. Switch to `bf16-mixed` on A100/H100.
+- **Never `*-true`.** Lightning's `Strategy.setup` calls `convert_module` *before*
+  `setup_optimizers`, so Adam's `exp_avg_sq` is allocated in bf16, where the `beta2=0.999`
+  update falls below the mantissa resolution and stops accumulating. Measured at `lr 1e-4`
+  over 20 steps: a parameter of magnitude 1.0 does not move at all, with a healthy-looking
+  loss curve. `-mixed` keeps the fp32 master copy that makes the optimizer trustworthy.
+
+**Two helpers in `utils.py`, called from `build_model()` and the notebooks.** Both are no-ops
+when they have nothing to do, and both are only correct under `*-mixed` precision:
+- `disable_peft_input_dtype_cast()` — PEFT's `lora.Linear.forward` calls
+  `_cast_input_dtype(x, lora_A.weight.dtype)`, upcasting a half activation to fp32 only for
+  autocast to cast it straight back down. The copy is pure waste and is billed at the widest
+  tensor in the net: `mlp.fc2`'s input at 4096×4096 is `(1, 65536, 5120)`, so exactly 1.25 GiB,
+  per block, per recompute. That allocation is what raised `OutOfMemoryError` in
+  `sf_triggers/2_finetune_template_1D.ipynb`.
+- `cast_frozen_to(model, dtype)` — 99.8% of the model is frozen under LoRA and has no reason
+  to sit in fp32. Trainable parameters stay fp32 (the optimizer's master copy) and
+  **normalization layers stay fp32** — both the usual stability rule and a hard CPU
+  requirement, since `F.layer_norm` raises `mixed dtype (CPU): expect parameter to have scalar
+  type of Float` against an fp32 input, which is what a notebook's pre-GPU smoke test does.
+  Note this must cast **buffers**, not just parameters: `LinearEmbedding.pos_embed` is a
+  `(1, 65536, 1280)` fp32 buffer added to a half activation at `embedding.py:124`, and
+  `fp32 + half → fp32` promotes the whole inter-block residual stream back to fp32 — 11 live
+  token tensors at 3.44 GiB instead of 1.72 GiB.
+
+After `cast_frozen_to`, a bare `model.forward(...)` outside autocast raises `expected scalar
+type Half but found Float` from the patch-embedding `Conv2d`. Wrap ad-hoc forward passes.
+
+**Also set, and worth keeping:** `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` alongside
+`CUBLAS_WORKSPACE_CONFIG` in the entry points (this one only needs to precede the first CUDA
+*allocation*, not the torch import). Every recompute allocates a different shape, which strands
+memory as reserved-but-unallocated — 1.82 GiB of it in the original failure. **torch 2.9 warns
+that this variable is deprecated in favour of `PYTORCH_ALLOC_CONF`; do not act on that warning.**
+On 2.9.1 the new name is silently ignored for this setting — verified via
+`torch.cuda.memory_snapshot()[i]["is_expandable"]`, which is `True` only under the old name.
+Re-check that flag before changing it, or expandable segments switch off with no error.
+`num_sanity_val_steps=0` for the same reason. `accumulate_grad_batches` is the only way left to
+raise the effective batch once `batch_size` is pinned at 1.
+
+**Measured, sf_triggers config (4096x4096, batch 1, all 10 layers checkpointed, Tesla T4
+14.74 GiB).** One forward+backward+step, random weights (shapes and dtypes are what matter):
+
+| configuration | peak allocated | outcome |
+|---|---|---|
+| `bf16-mixed`, PEFT cast on, `lora_dropout 0.1` | 13.37 GiB | **OOM** |
+| `16-mixed`, cast off, `lora_dropout 0.0`, `cast_frozen_to(fp16)` | 11.44 GiB | runs, 2.35 GiB headroom |
+| + `dual_ln_full(...).to(q.dtype)` | **10.05 GiB** | runs, 2.82 GiB headroom |
+
+Individual levers, measured rather than estimated:
+- `disable_peft_input_dtype_cast` + `cast_frozen_to` + `16-mixed`: −1.9 GiB combined.
+- `dual_ln_full(...).to(q.dtype)` in `transformer_ls.py:105-106` (**a vendored change, no
+  upstream diff signal**): **−1.39 GiB**, the single largest lever. `nn.LayerNorm` always
+  returns fp32 under autocast, so leaving `k`/`v` in fp32 makes `get_overlapping_tiles()`
+  `.contiguous()` materialize a ~4× expansion of both in fp32 — 1.25 GiB per tile set instead
+  of 0.62 GiB. The consuming matmuls run in half either way, so the cast only moves earlier.
+- `expandable_segments:True`: fragmentation 2.20 GiB → 0.95 GiB, headroom +1.25 GiB.
+- `lora_dropout: 0.1 → 0.0`: ~5 MiB. Kept because it is free, **not** a real lever — under
+  checkpointing those tensors are transient and never coexist with the peak.
+- `ft_checkpoint_head=True`: **0 GiB** at this config, for the same reason. Off by default.
+
+The lesson worth carrying: levers that look large in a per-tensor budget are worth nothing if
+the tensor does not coexist with the peak. Measure with `probe_step_memory()`.
+
+**Host RAM is a separate problem with a similar symptom.** One sample is
+`(13, T, 4096, 4096)` fp32 = 832 MiB, and `builders.py` hardcodes `pin_memory=True` and
+`persistent_workers=True` while reusing one kwargs dict for both loaders — so the default
+`prefetch_factor=2` can leave train and val together holding well over 10 GiB of pinned host
+memory. When that overcommits, workers die with `terminate called without an active exception`
+and the traceback points nowhere near the cause. Pass `prefetch_factor=1` to
+`build_helio_dataloaders()`. It is deliberately a call-site argument, not a config field (a
+per-machine knob, like `num_workers`), and it changes **zero** bytes of VRAM.
+
 ### Distributed Training
 
 DDP via PyTorch Lightning. Use `CUDA_VISIBLE_DEVICES` to select GPUs. Logging is rank-aware to avoid duplicate WandB/CSV entries.

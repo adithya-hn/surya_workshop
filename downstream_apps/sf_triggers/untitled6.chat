@@ -1,0 +1,107 @@
+{
+  "messages": [
+    {
+      "id": "f02dd1dd-cada-485b-b379-e6cd1c22f658",
+      "time": 1789713224.2280123,
+      "raw_time": false,
+      "metadata": {
+        "model": {
+          "id": "sonnet",
+          "settings": {}
+        },
+        "settings": {},
+        "to_persona": "jupyter-ai-personas::jupyter_ai_acp_client::ClaudeAcpPersona"
+      },
+      "sender": "ahn",
+      "type": "msg",
+      "body": "adi_wdir/surya_workshop/downstream_apps/sf_triggers/2_finetune_template_1D.ipynb cell 24 has some issue plan and help me fix that"
+    },
+    {
+      "body": "API Error: Request rejected (429) \u00b7 Budget has been exceeded! Team=0a2050bd-2c4f-41ee-beec-2e1c7bf7f349 Current cost: 850.013896875001, Max budget: 850.0",
+      "raw_time": false,
+      "type": "msg",
+      "sender": "jupyter-ai-personas::jupyter_ai_acp_client::ClaudeAcpPersona",
+      "id": "dfb3434e-b060-43d5-81c1-c4593578b8cf",
+      "time": 1789713406.5250003,
+      "mentions": []
+    },
+    {
+      "sender": "jupyter-ai-personas::jupyter_ai_acp_client::ClaudeAcpPersona",
+      "raw_time": false,
+      "type": "msg",
+      "body": "An error occurred while processing your message.\n\n<details class=\"jp-jai-error-details\">\n<summary>Error details (Error -32603: Internal error: API Error: Request rejected (429) \u00b7 Budget has been exceeded! Team=0a2050bd-2c4f-41ee-beec-2e1c7bf7f349 \u2026)</summary>\n\n**Error code:** -32603\n\n**Message:** Internal error: API Error: Request rejected (429) \u00b7 Budget has been exceeded! Team=0a2050bd-2c4f-41ee-beec-2e1c7bf7f349 Current cost: 850.013896875001, Max budget: 850.0\n\n**Data:**\n\n```json\n{\n  \"errorKind\": \"rate_limit\"\n}\n```\n\n**Traceback:**\n\n```\nTraceback (most recent call last):\n  File \"/srv/conda/envs/notebook/lib/python3.11/site-packages/jupyter_ai_persona_manager/persona_manager.py\", line 71, in _safe_process\n    await persona.process_message(message)\n  File \"/srv/conda/envs/notebook/lib/python3.11/site-packages/jupyter_ai_acp_client/acp_personas/claude.py\", line 78, in process_message\n    raise e\n  File \"/srv/conda/envs/notebook/lib/python3.11/site-packages/jupyter_ai_acp_client/acp_personas/claude.py\", line 72, in process_message\n    await super().process_message(message)\n  File \"/srv/conda/envs/notebook/lib/python3.11/site-packages/jupyter_ai_acp_client/telemetry.py\", line 99, in wrapper\n    result = await method(self, *args, **kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/srv/conda/envs/notebook/lib/python3.11/site-packages/jupyter_ai_acp_client/base_acp_persona.py\", line 530, in process_message\n    await client.prompt_and_reply(\n  File \"/srv/conda/envs/notebook/lib/python3.11/site-packages/jupyter_ai_acp_client/default_acp_client.py\", line 321, in prompt_and_reply\n    response = await conn.prompt(\n               ^^^^^^^^^^^^^^^^^^\n  File \"/srv/conda/envs/notebook/lib/python3.11/site-packages/acp/client/connection.py\", line 201, in prompt\n    return await request_model(\n           ^^^^^^^^^^^^^^^^^^^^\n  File \"/srv/conda/envs/notebook/lib/python3.11/site-packages/acp/utils.py\", line 97, in request_model\n    response = await conn.send_request(method, serialize_params(params))\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/srv/conda/envs/notebook/lib/python3.11/site-packages/acp/connection.py\", line 144, in send_request\n    return await future\n           ^^^^^^^^^^^^\nacp.exceptions.RequestError: Internal error: API Error: Request rejected (429) \u00b7 Budget has been exceeded! Team=0a2050bd-2c4f-41ee-beec-2e1c7bf7f349 Current cost: 850.013896875001, Max budget: 850.0\n```\n</details>",
+      "mentions": [],
+      "time": 1789713406.53143,
+      "id": "a149c39f-baab-49af-8c3d-6577c04e8359"
+    }
+  ],
+  "users": {
+    "jupyter-ai-personas::jupyter_ai_jupyternaut::JupyternautPersona": {
+      "name": "Jupyternaut",
+      "display_name": "Jupyternaut",
+      "initials": null,
+      "bot": true,
+      "avatar_url": "/user/ahn/api/ai/avatars/jupyter-ai-personas%3A%3Ajupyter_ai_jupyternaut%3A%3AJupyternautPersona",
+      "username": "jupyter-ai-personas::jupyter_ai_jupyternaut::JupyternautPersona",
+      "color": null
+    },
+    "ahn": {
+      "mention_name": "ahn",
+      "color": "var(--jp-collaborator-color5)",
+      "bot": false,
+      "name": "ahn",
+      "avatar_url": null,
+      "username": "ahn",
+      "initials": "a",
+      "display_name": "ahn"
+    },
+    "jupyter-ai-personas::jupyter_ai_acp_client::ClaudeAcpPersona": {
+      "username": "jupyter-ai-personas::jupyter_ai_acp_client::ClaudeAcpPersona",
+      "bot": true,
+      "color": null,
+      "initials": null,
+      "display_name": "Claude",
+      "avatar_url": "/user/ahn/api/ai/avatars/jupyter-ai-personas%3A%3Ajupyter_ai_acp_client%3A%3AClaudeAcpPersona",
+      "name": "Claude"
+    },
+    "jupyter-ai-personas::jupyter_ai_acp_client::CodexAcpPersona": {
+      "username": "jupyter-ai-personas::jupyter_ai_acp_client::CodexAcpPersona",
+      "name": "Codex",
+      "bot": true,
+      "avatar_url": "/user/ahn/api/ai/avatars/jupyter-ai-personas%3A%3Ajupyter_ai_acp_client%3A%3ACodexAcpPersona",
+      "initials": null,
+      "color": null,
+      "display_name": "Codex"
+    },
+    "jupyter-ai-personas::jupyter_ai_acp_client::CopilotAcpPersona": {
+      "display_name": "Copilot",
+      "color": null,
+      "name": "Copilot",
+      "initials": null,
+      "avatar_url": "/user/ahn/api/ai/avatars/jupyter-ai-personas%3A%3Ajupyter_ai_acp_client%3A%3ACopilotAcpPersona",
+      "username": "jupyter-ai-personas::jupyter_ai_acp_client::CopilotAcpPersona",
+      "bot": true
+    },
+    "jupyter-ai-personas::jupyter_ai_acp_client::MistralVibeAcpPersona": {
+      "username": "jupyter-ai-personas::jupyter_ai_acp_client::MistralVibeAcpPersona",
+      "initials": null,
+      "name": "Mistral Vibe",
+      "color": null,
+      "bot": true,
+      "avatar_url": "/user/ahn/api/ai/avatars/jupyter-ai-personas%3A%3Ajupyter_ai_acp_client%3A%3AMistralVibeAcpPersona",
+      "display_name": "Mistral Vibe"
+    }
+  },
+  "attachments": {},
+  "metadata": {
+    "acp_session_ids": {
+      "jupyter-ai-personas::jupyter_ai_acp_client::ClaudeAcpPersona": "db7a0415-d6ef-4824-9964-e6accdcabe99"
+    },
+    "id": "9b481b78-5f45-446b-8cfe-26b109726317",
+    "acp_config_options": {
+      "jupyter-ai-personas::jupyter_ai_acp_client::ClaudeAcpPersona": {
+        "model": "sonnet"
+      }
+    }
+  }
+}

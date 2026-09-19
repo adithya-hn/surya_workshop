@@ -227,6 +227,17 @@ def build_scalers(info) -> Dict:
 
 HEAD_PREFIX = "head_"
 
+# Normalization layers kept in fp32 by cast_frozen_to(). Both for numerical stability (the
+# usual mixed-precision rule) and because F.layer_norm on CPU refuses a half weight with an
+# fp32 input, which would break any pre-GPU forward pass in a notebook.
+_NORM_LAYERS = (
+    torch.nn.LayerNorm,
+    torch.nn.GroupNorm,
+    torch.nn.LocalResponseNorm,
+    torch.nn.modules.batchnorm._BatchNorm,
+    torch.nn.modules.instancenorm._InstanceNorm,
+)
+
 
 def discover_head_modules(model: torch.nn.Module) -> list[str]:
     """Find the fine-tuning head modules to keep trainable under LoRA.
@@ -378,6 +389,119 @@ def apply_peft_lora(
     )
 
     return model
+
+
+def disable_peft_input_dtype_cast(model: torch.nn.Module) -> int:
+    """Stop PEFT from upcasting activations to the adapter weight dtype.
+
+    ``peft.tuners.lora.Linear.forward`` calls ``_cast_input_dtype(x, lora_A.weight.dtype)``
+    before running the adapter branch.  Under mixed precision the adapter weights are
+    fp32 while ``x`` is fp16/bf16, so PEFT allocates a fresh fp32 copy of the
+    activation -- and autocast then casts it straight back down for ``lora_A``.  The
+    copy buys nothing, and it is charged at the widest point in the network: for
+    HelioSpectformer2D at 4096x4096, ``mlp.fc2``'s input is (1, 65536, 5120), so the
+    copy is exactly 1.25 GiB, per adapted block, on every gradient-checkpoint recompute.
+
+    ``peft.helpers.disable_input_dtype_casting`` does the same thing as a context
+    manager, which cannot wrap ``trainer.fit()`` cleanly.  This sets the flag once.
+
+    Only meaningful under autocast (``training.precision`` ending in ``-mixed``).  Under
+    ``*-true`` precision the adapter weights are already half, ``x.dtype == dtype``, and
+    PEFT skips the copy on its own -- so this becomes redundant rather than wrong.
+
+    Args:
+        model: A PEFT-wrapped model.  A model without adapters is a no-op.
+
+    Returns:
+        The number of tuner layers touched, so a silently ineffective call is visible
+        in the log rather than only in the peak-memory number.
+    """
+    from peft.tuners.tuners_utils import BaseTunerLayer
+
+    touched = 0
+    for module in model.modules():
+        if isinstance(module, BaseTunerLayer):
+            module.cast_input_dtype_enabled = False
+            touched += 1
+
+    print(f"[LoRA] Disabled PEFT input-dtype casting on {touched} tuner layer(s).")
+    return touched
+
+
+def cast_frozen_to(model: torch.nn.Module, dtype: torch.dtype) -> tuple[int, int]:
+    """Cast every frozen parameter and every float buffer to ``dtype``.
+
+    Trainable parameters are deliberately left in fp32 so the optimizer keeps a
+    full-precision master copy.  Under autocast the two dtypes coexist: autocast casts
+    the fp32 adapter weights down for each matmul, and the frozen half-precision
+    weights are already at the compute dtype.
+
+    Beyond halving the frozen weights, this fixes two specific things on
+    HelioSpectformer2D at 4096x4096:
+
+      * ``LinearEmbedding.pos_embed`` is a (1, 65536, 1280) *buffer*, not a parameter --
+        320 MiB in fp32.  ``embedding.py`` adds it to the half-precision patch-embedding
+        output, and ``half + fp32 -> fp32``, which pins the entire inter-block residual
+        stream to fp32 for every block.  With all 10 layers gradient-checkpointed that is
+        11 live (1, 65536, 1280) tensors: 3.44 GiB in fp32 versus 1.72 GiB in half.
+      * ``complex_weight`` (169 M elements, 645 MiB fp32) halves.  It is upcast back to
+        fp32 inside ``SpectralGatingNetwork.forward`` for the FFT, so the rounding is
+        permanent: measured relative error is 0.018% mean in fp16, 0.141% in bf16.  That
+        is below the activation noise floor of mixed precision, but it *is* a change to a
+        pretrained tensor, hence the print.
+
+    Call this *after* :func:`load_pretrained_weights` and :func:`apply_peft_lora`, so the
+    checkpoint is read at full precision and rounded exactly once, and so
+    ``requires_grad`` already reflects the chosen fine-tuning regime.  Under full
+    fine-tuning (``use_lora: false, freeze_backbone: false``) nothing is frozen and this
+    only casts buffers.
+
+    Normalization layers are deliberately left in fp32.  That is the standard
+    mixed-precision rule -- their statistics are the numerically delicate part and they hold
+    only ``2 * embed_dim`` parameters each, so excluding them costs well under a megabyte.
+    It is also a hard requirement on CPU: ``F.layer_norm`` raises "mixed dtype (CPU):
+    expect parameter to have scalar type of Float" when the weight is half and the input is
+    fp32, which is exactly what a notebook's pre-GPU smoke test does.  (CUDA happens to
+    tolerate it and returns fp32.)
+
+    Note that after this call a bare ``model.forward(...)`` outside an autocast context
+    raises ``expected scalar type Half but found Float`` from the patch-embedding Conv2d.
+    Wrap ad-hoc forward passes in ``torch.autocast``.
+
+    Args:
+        model: The model to cast in place.
+        dtype: ``torch.float16`` on pre-Ampere GPUs (SM75 emulates bf16),
+            ``torch.bfloat16`` on SM80+.
+
+    Returns:
+        ``(n_params_cast, n_buffers_cast)``.
+    """
+    n_params = 0
+    n_buffers = 0
+    n_norm_skipped = 0
+
+    # Walk modules rather than parameters() so normalization layers can be identified and
+    # skipped wholesale, including their buffers (a BatchNorm's running statistics).
+    for module in model.modules():
+        if isinstance(module, _NORM_LAYERS):
+            n_norm_skipped += 1
+            continue
+        # recurse=False: each module is visited once by the outer loop, so this assigns
+        # every parameter to exactly one module and never re-casts through a parent.
+        for param in module.parameters(recurse=False):
+            if not param.requires_grad and param.is_floating_point() and param.dtype != dtype:
+                param.data = param.data.to(dtype)
+                n_params += 1
+        for buf in module.buffers(recurse=False):
+            if buf is not None and buf.is_floating_point() and buf.dtype != dtype:
+                buf.data = buf.data.to(dtype)
+                n_buffers += 1
+
+    print(
+        f"[PRECISION] Cast {n_params} frozen parameter(s) and {n_buffers} buffer(s) to "
+        f"{dtype}; left {n_norm_skipped} normalization layer(s) in fp32."
+    )
+    return n_params, n_buffers
 
 
 def load_pretrained_weights(model: torch.nn.Module, pretrained_path: Optional[str]) -> None:

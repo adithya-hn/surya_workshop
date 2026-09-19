@@ -101,9 +101,21 @@ class AttentionLS(nn.Module):
         q, k, v = qkv.chunk(3, dim=2)
         q = q.mul(self.scale)
 
-        # Layer norm on the projected keys and values
-        k = self.dual_ln_full(k)
-        v = self.dual_ln_full(v)
+        # Layer norm on the projected keys and values.
+        #
+        # The .to(q.dtype) is a memory fix, not a numerics change. Under autocast LayerNorm
+        # always returns fp32, while q here is the autocast compute dtype (it came out of
+        # self.qkv, an autocast-eligible Linear). Leaving k and v in fp32 makes every
+        # downstream tensor fp32 -- including get_overlapping_tiles(), which .contiguous()
+        # materializes a ~4x expansion of both. At 4096x4096 that is 1.25 GiB per tile set
+        # in fp32 versus 0.62 GiB in half. The matmuls that consume them would be run in
+        # half by autocast either way, so casting here only moves the cast earlier, ahead of
+        # the expansion instead of after it. The norm itself is still computed in fp32.
+        #
+        # Vendored file: this is a local change with no upstream diff signal. See the GPU
+        # Memory section of CLAUDE.md.
+        k = self.dual_ln_full(k).to(q.dtype)
+        v = self.dual_ln_full(v).to(q.dtype)
 
         # output size: bsz x n_heads x seqlen x d
         if self.nglo > 0:

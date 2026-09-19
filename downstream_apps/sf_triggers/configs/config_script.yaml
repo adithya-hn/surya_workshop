@@ -49,15 +49,24 @@ data:
   time_delta_target_minutes: 60   # Step size (minutes) between forecast frames
 
   # -- Downstream label alignment (flare catalog → Surya index) --
-  flare_index_path: /home/jovyan/scratch_space/adithya_hn/Surya_ML_data_Training_with_intensity.csv
-  ds_time_column: start_time      # Column in the flare catalog used as the event timestamp
+  # Filtered down from Surya_ML_data_Training_with_intensity_sharp_ts.csv (50 rows) to the
+  # 20 rows that have a matching mask file in mask_dir below -- the other 30 rows (events
+  # from 2014-12-17 onward) have no mask yet and would fail FlareDSDataset's mask-match
+  # check at init. Re-run the filter and point back at the full 50-row file once those
+  # masks are added.
+  # 19 of the 20 peak_time-matched rows -- gev_20141024_2107 excluded: its mask file
+  # (hmi.sharp_720s.4698.20141024_213600_TAI.bitmap.fits in peak_masks/) is corrupted
+  # (65MB vs the uniform 134MB of the other 19, no readable FITS header). Re-add it via
+  # Surya_ML_data_Training_with_intensity_sharp_ts_masked20.csv once that file is fixed.
+  flare_index_path: /home/jovyan/scratch_space/adithya_hn/Surya_ML_data_Training_with_intensity_sharp_ts_masked19_peaktime.csv
+  ds_time_column: peak_time       # Column in the flare catalog used as the event timestamp
   ds_time_tolerance: 4d           # Max allowed gap between catalog and Surya timestamps
   ds_match_direction: forward     # "forward": use solar state *before* the flare (causal)
   ds_val_fraction: 0.2            # Fraction of DS events (not Surya timesteps) held out for val
   ds_split_seed: 42               # Seed for the event-level train/val split
 
   # -- Flare-region mask alignment (mask file → flare catalog row) --
-  mask_dir: /home/jovyan/scratch_space/adithya_hn/mask_bitmaps
+  mask_dir: /home/jovyan/scratch_space/adithya_hn/peak_masks
   mask_time_tolerance: 10min      # Max allowed gap between catalog row and mask timestamps
 
   # -- Local data (only needed when the index contains relative local paths) --
@@ -110,7 +119,7 @@ data:
   s3_boto3_part_size_mb: 64       # part size in MB (benchmark default: 64)
 
   # -- Development --
-  max_samples: 10                 # Cap dataset size for quick experiments (null = all samples)
+  max_samples: 20                 # Cap dataset size for quick experiments (null = all samples)
 
 
 # -----------------------------------------------------------------------------
@@ -151,8 +160,8 @@ model:
   # -- LoRA adapters --
   use_lora: true
   lora_config:
-    r: 2
-    lora_alpha: 8
+    r: 8
+    lora_alpha: 16
     # 0.0 rather than the usual 0.1. PEFT builds nn.Dropout when p > 0 and nn.Identity when
     # p == 0, so p > 0 allocates an output tensor plus a bool mask the same shape as its
     # input -- on fc2 that input is (1, 65536, 5120). Measured, though, the saving is small

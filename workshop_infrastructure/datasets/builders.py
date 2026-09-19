@@ -113,6 +113,7 @@ def build_helio_dataloaders(
     scalers: Any = None,
     num_workers: int | None = None,
     seed: int | None = None,
+    prefetch_factor: int | None = None,
     **task_kwargs,
 ) -> Tuple[DataLoader, DataLoader]:
     """Build the train and validation DataLoaders described by ``cfg``.
@@ -128,6 +129,15 @@ def build_helio_dataloaders(
             a bare ``shuffle=True`` seeds its sampler from whatever the global torch RNG
             state happens to be when the iterator is created, so anything that consumes
             RNG earlier in the program silently reshuffles the data.
+        prefetch_factor: Batches each worker keeps queued ahead of the training loop.
+            ``None`` uses PyTorch's default of 2. This is a *host* memory knob, not a GPU
+            one -- it will not move ``torch.cuda.max_memory_allocated()`` by one byte. One
+            Surya sample is (13, T, 4096, 4096) fp32 = 832 MiB, so a loader with 4 workers
+            and prefetch_factor 2 can hold 6.5 GiB of pinned host RAM; because
+            ``persistent_workers=True`` keeps the validation workers resident through
+            training, both loaders hold that at once. On a machine where that overcommits,
+            workers die with "terminate called without an active exception" and the run
+            fails for a reason that looks nothing like its cause. Set 1 there.
         **task_kwargs: Extra keyword arguments forwarded to ``dataset_cls``.
 
     Returns:
@@ -152,6 +162,11 @@ def build_helio_dataloaders(
         loader_kwargs["multiprocessing_context"] = "spawn"
         loader_kwargs["persistent_workers"] = True
         loader_kwargs["worker_init_fn"] = partial(_seed_worker, base_seed=base_seed)
+        # Set here rather than above for the same reason: DataLoader rejects
+        # prefetch_factor when num_workers == 0. Only passed when the caller asked for a
+        # non-default value, so PyTorch keeps owning the default.
+        if prefetch_factor is not None:
+            loader_kwargs["prefetch_factor"] = prefetch_factor
 
     # An explicit generator makes the shuffle a function of the seed alone, rather than
     # of the global RNG state at the moment the iterator happens to be created.

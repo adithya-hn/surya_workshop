@@ -21,6 +21,8 @@ from workshop_infrastructure.configs import (
     ModelConfig,
     TimeEmbeddingConfig,
     TrainingConfig,
+    VALID_PRECISION,
+    _TRAINING_KEYS,
 )
 
 
@@ -145,3 +147,73 @@ def test_time_dim_less_than_or_equal_to_available_deltas_is_accepted():
         data=make_data_config(time_delta_input_minutes=[0, -60]),
         model=ModelConfig(time_embedding=TimeEmbeddingConfig(time_dim=2)),
     )
+
+
+# ---------------------------------------------------------------------------
+# training.precision / training.accumulate_grad_batches
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("precision", VALID_PRECISION)
+def test_every_valid_precision_is_accepted(precision):
+    assert make_training_config(precision=precision).precision == precision
+
+
+def test_unknown_precision_raises_and_names_the_alternatives():
+    with pytest.raises(ValueError, match="training.precision") as excinfo:
+        make_training_config(precision="fp16")
+    # The error has to be actionable: a typo should tell you what to write instead.
+    for valid in VALID_PRECISION:
+        assert valid in str(excinfo.value)
+
+
+def test_default_precision_is_mixed_so_cast_frozen_to_stays_reachable():
+    # build_model() only calls cast_frozen_to() under a *-mixed precision, because half
+    # weights need autocast to reconcile them with the fp32 adapters. If the default ever
+    # changes to a *-true or 32-true mode, that memory lever silently stops firing.
+    assert make_training_config().precision.endswith("-mixed")
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, True, "2"])
+def test_accumulate_grad_batches_rejects_non_positive_ints(bad):
+    with pytest.raises(ValueError, match="accumulate_grad_batches"):
+        make_training_config(accumulate_grad_batches=bad)
+
+
+def test_accumulate_grad_batches_accepts_positive_ints():
+    assert make_training_config(accumulate_grad_batches=4).accumulate_grad_batches == 4
+
+
+def test_training_keys_whitelist_matches_the_dataclass_fields():
+    """Guard the two-place edit that adding a training: key requires.
+
+    A key in _TRAINING_KEYS without a matching TrainingConfig field silently does nothing;
+    a field without the key makes the YAML raise on a legitimate value. Neither shows up
+    until someone edits a config, so pin the correspondence here instead.
+    """
+    field_names = {f.name for f in dataclasses.fields(TrainingConfig)}
+    # These live on TrainingConfig but come from other sections of the YAML.
+    not_from_training_section = {
+        "job_id", "data", "model", "output", "wandb_project", "wandb_entity",
+    }
+    assert _TRAINING_KEYS <= field_names
+    assert field_names - not_from_training_section == set(_TRAINING_KEYS)
+
+
+def test_unknown_training_key_still_raises(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "job_id: test\n"
+        "data:\n"
+        "  train_data_path: train.csv\n"
+        "  valid_data_path: valid.csv\n"
+        "  scalers_path: scalers.yaml\n"
+        "  channels: [aia171]\n"
+        "  time_delta_input_minutes: [0]\n"
+        "  time_delta_target_minutes: 60\n"
+        "model: {}\n"
+        "training:\n"
+        "  precission: 16-mixed\n"  # deliberate typo
+    )
+    with pytest.raises(ValueError, match="precission"):
+        load_flare_config(str(cfg))

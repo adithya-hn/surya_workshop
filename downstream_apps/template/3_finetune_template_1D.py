@@ -33,6 +33,20 @@ import os
 # setdefault so a deliberate ":16:8" (smaller workspace, slightly slower) is respected.
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
+# Lets the caching allocator grow a segment instead of reserving fixed-size blocks. This run
+# allocates tensors of many different shapes -- every gradient-checkpoint recompute is a
+# different shape -- which strands memory as "reserved but unallocated": visible in
+# nvidia-smi, unusable by the next allocation. The failure this replaces reported 1.82 GiB
+# stranded that way.
+#
+# torch 2.9 prints "PYTORCH_CUDA_ALLOC_CONF is deprecated, use PYTORCH_ALLOC_CONF instead".
+# Ignore it: PYTORCH_ALLOC_CONF is silently ignored for this setting on 2.9.1 (verified via
+# torch.cuda.memory_snapshot()[i]["is_expandable"], which is only True under the old name).
+# Do not "fix" the warning without re-checking that flag, or expandable segments turn off
+# without a word. Unlike CUBLAS_WORKSPACE_CONFIG this only needs to precede the first CUDA
+# *allocation*, not the torch import.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 from pathlib import Path
 from typing import Tuple
 
@@ -51,6 +65,8 @@ from workshop_infrastructure.datasets.builders import build_helio_dataloaders
 from workshop_infrastructure.utils import (
     apply_peft_lora,
     build_scalers,
+    cast_frozen_to,
+    disable_peft_input_dtype_cast,
     load_pretrained_weights,
     UploadBestCheckpointToS3,
 )
@@ -181,6 +197,23 @@ def build_model(cfg: TrainingConfig, scalers, train_baseline: bool = False) -> L
                     param.requires_grad = False
         if cfg.model.use_lora:
             model = apply_peft_lora(model, cfg.model.lora_config)
+            # Under mixed precision PEFT would otherwise upcast every adapted layer's
+            # input back to the fp32 adapter dtype, only for autocast to cast it straight
+            # down again. At 4096x4096 that wasted copy is 1.25 GiB on mlp.fc2 alone, per
+            # block, on every gradient-checkpoint recompute. No-op under *-true precision.
+            disable_peft_input_dtype_cast(model)
+
+        # Frozen weights and all buffers to half; trainable parameters stay fp32 so the
+        # optimizer keeps a full-precision master copy. Must come after
+        # load_pretrained_weights() so the checkpoint is read at full precision and
+        # rounded once, and after the requires_grad decisions above. The big win here is
+        # the pos_embed *buffer*: fp32 + half promotes back to fp32, so leaving it alone
+        # pins the whole inter-block residual stream to fp32.
+        if cfg.precision.endswith("-mixed"):
+            cast_frozen_to(
+                model,
+                torch.bfloat16 if cfg.precision.startswith("bf16") else torch.float16,
+            )
 
         _log_trainable_parameters(model)
 
@@ -235,13 +268,21 @@ def build_trainer(
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices="auto",
         strategy="auto",
-        precision="bf16-mixed" if torch.cuda.is_available() else "32-true",
+        # Precision is a config value, not a constant: the right choice is hardware
+        # dependent (fp16 on SM75, bf16 on SM80+) and it is the primary memory lever for a
+        # 2D head. The CPU fallback ignores it -- neither autocast dtype has a fast CPU path.
+        precision=cfg.precision if torch.cuda.is_available() else "32-true",
         # Reproducibility. "warn" (the default) gives bit-identical runs wherever a
         # deterministic kernel exists and names the op where one does not, instead of
         # killing the run. benchmark is pinned rather than inherited: cuDNN autotuning
         # picks algorithms by timing, so leaving it on would reintroduce run-to-run drift.
         deterministic=cfg.deterministic,
         benchmark=False,
+        accumulate_grad_batches=cfg.accumulate_grad_batches,
+        # The sanity check runs under no_grad so its own peak is small, but it grows the
+        # caching allocator's pool with a differently-shaped set of blocks before
+        # training's first allocation, and it costs two full host-to-device sample copies.
+        num_sanity_val_steps=0,
         logger=loggers,
         callbacks=[checkpoint_cb, upload_cb],
         log_every_n_steps=2,

@@ -195,7 +195,24 @@ training:
   rollout_steps: 0
   drop_hmi_probability: 0.0
   use_latitude_in_learned_flow: false
-  dtype: float32        # Options: float32 | bfloat16
+  dtype: float32        # Options: float32 | bfloat16. NOTE: inert -- the backbone accepts
+                        # this and drops it. `precision` below is the real control.
+
+  # Mixed-precision mode, passed to lightning.Trainer. Both a memory and a speed lever, and
+  # the right value is hardware dependent:
+  #   16-mixed    fp16 autocast + fp32 master weights + GradScaler. Correct for T4/V100
+  #               (SM70/75), which have native fp16 tensor cores but EMULATE bf16. Measured
+  #               on a T4 at a 16384x1280x5120 GEMM: 9.3 ms fp16, 56.8 ms fp32, 90.1 ms
+  #               bf16 -- bf16 there is slower than plain fp32.
+  #   bf16-mixed  Prefer on A100/H100 (SM80+): native, and no GradScaler needed.
+  #   32-true     No autocast. Fine for the 1D head; will not fit a 2D head at 4096x4096.
+  #   bf16-true   Do not use. Lightning casts the module before building the optimizer, so
+  #               Adam's second moment lives in bf16 and stops accumulating.
+  precision: 16-mixed
+
+  # Effective batch = batch_size * accumulate_grad_batches, at the memory cost of
+  # batch_size alone. The lever to reach for when batch_size is pinned at 1 by memory.
+  accumulate_grad_batches: 1
 
 
 # -----------------------------------------------------------------------------

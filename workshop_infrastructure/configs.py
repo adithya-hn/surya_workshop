@@ -51,6 +51,27 @@ VALID_S3_MODES = ("download", "simplecache", "stream")
 #             backward, so learned_flow: true is incompatible with this setting.
 VALID_DETERMINISTIC = (True, False, "warn")
 
+# Accepted values for training.precision, passed straight to lightning.Trainer. This is the
+# only precision control in this config that does anything -- training.dtype below is
+# accepted for backwards compatibility and dropped on the floor (the backbone documents it
+# as unused).
+#   "32-true"    — no autocast. For HelioSpectformer2D at 4096x4096 this only fits at
+#                  reduced resolution.
+#   "16-mixed"   — fp16 autocast, fp32 master weights, automatic GradScaler. The right
+#                  default on any pre-Ampere GPU: SM75 (T4) has native fp16 tensor cores
+#                  but *emulates* bf16. Measured on a T4 at this model's MLP GEMM shape
+#                  (16384x1280x5120): 9.3 ms fp16, 56.8 ms fp32, 90.1 ms bf16 — i.e. bf16
+#                  is slower than plain fp32 there, not faster.
+#   "bf16-mixed" — bf16 autocast. Prefer on Ampere+ (SM80+), where bf16 is native and its
+#                  wider exponent range removes the need for a GradScaler.
+#   "bf16-true"  — bf16 *weights*. NOT recommended: Lightning casts the module before
+#                  building the optimizer (Strategy.setup), so Adam's exp_avg_sq lives in
+#                  bf16, where the beta2=0.999 update falls below the mantissa resolution
+#                  and stops accumulating. Measured: a parameter of magnitude 1.0 at
+#                  lr 1e-4 does not move at all over 20 steps, with a plausible-looking
+#                  loss curve. Kept selectable only so the failure can be demonstrated.
+VALID_PRECISION = ("32-true", "16-mixed", "bf16-mixed", "bf16-true")
+
 
 @dataclass
 class TimeEmbeddingConfig:
@@ -252,6 +273,14 @@ class TrainingConfig:
     drop_hmi_probability: float = 0.0
     use_latitude_in_learned_flow: bool = False
     dtype: str = "float32"
+    # One of VALID_PRECISION (above). The primary memory lever for a 2D head, and on
+    # pre-Ampere hardware a large speed lever too -- see the constant's comment.
+    precision: str = "16-mixed"
+    # Trades wall time for memory: N micro-batches are accumulated before each optimizer
+    # step, giving an effective batch of batch_size * N at the memory cost of batch_size
+    # alone. batch_size is pinned at 1 for HelioSpectformer2D at 4096x4096, so this is the
+    # only remaining way to raise the effective batch.
+    accumulate_grad_batches: int = 1
     wandb_project: str = "surya_downstream"
     wandb_entity: Optional[str] = None
 
@@ -271,6 +300,22 @@ class TrainingConfig:
             raise ValueError(
                 f"training.seed must be an integer, got {self.seed!r} "
                 f"({type(self.seed).__name__}). Write it unquoted in the YAML, e.g. seed: 42."
+            )
+        if self.precision not in VALID_PRECISION:
+            raise ValueError(
+                f"Unknown training.precision {self.precision!r}. "
+                f"Valid values are: {', '.join(VALID_PRECISION)}."
+            )
+        # bool is excluded because it subclasses int, and accumulate_grad_batches: true
+        # would otherwise silently mean 1.
+        if (
+            isinstance(self.accumulate_grad_batches, bool)
+            or not isinstance(self.accumulate_grad_batches, int)
+            or self.accumulate_grad_batches < 1
+        ):
+            raise ValueError(
+                "training.accumulate_grad_batches must be an integer >= 1, got "
+                f"{self.accumulate_grad_batches!r}."
             )
         if self.deterministic is True and self.model.learned_flow:
             raise ValueError(
@@ -426,6 +471,8 @@ def load_config(
         drop_hmi_probability=training.get("drop_hmi_probability", 0.0),
         use_latitude_in_learned_flow=training.get("use_latitude_in_learned_flow", False),
         dtype=training.get("dtype", "float32"),
+        precision=training.get("precision", "16-mixed"),
+        accumulate_grad_batches=training.get("accumulate_grad_batches", 1),
         wandb_project=logging_cfg.get("wandb_project", "surya_downstream"),
         wandb_entity=logging_cfg.get("wandb_entity"),
     )
@@ -436,6 +483,7 @@ def load_config(
 _TRAINING_KEYS = frozenset({
     "learning_rate", "max_epochs", "batch_size", "num_workers", "seed", "deterministic",
     "rollout_steps", "drop_hmi_probability", "use_latitude_in_learned_flow", "dtype",
+    "precision", "accumulate_grad_batches",
 })
 _LOGGING_KEYS = frozenset({"wandb_project", "wandb_entity"})
 

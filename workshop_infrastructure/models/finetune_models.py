@@ -8,6 +8,7 @@ import torch
 if TYPE_CHECKING:
     from workshop_infrastructure.configs import ModelConfig
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 from workshop_infrastructure.models.helio_spectformer import HelioSpectFormer
 from workshop_infrastructure.models.embedding import LinearDecoder, PerceiverDecoder
@@ -259,6 +260,7 @@ class HelioSpectformer2D(nn.Module):
         # --- Fine-tuning head ---
         ft_unembedding_type: str = "linear",
         ft_out_chans: int = 1,
+        ft_checkpoint_head: bool = False,
     ):
         super().__init__()
 
@@ -301,8 +303,25 @@ class HelioSpectformer2D(nn.Module):
                 f"ft_unembedding_type must be 'linear' or 'perceiver', got {ft_unembedding_type!r}"
             )
 
+        self.checkpoint_head = ft_checkpoint_head
+
     def forward(self, batch):
         tokens = self.backbone.forward(batch)
+        if self.checkpoint_head and self.training and torch.is_grad_enabled():
+            # Off by default, and measured worth 0 GiB at the sf_triggers config (4096x4096,
+            # batch 1, all 10 backbone layers checkpointed): peak was 10.05 GiB either way.
+            # The decoder's saved activations are real -- one (B, L, D) contiguous copy that
+            # einops' reshape+permute forces Conv2d to make, plus two (B, 1, H, W) tensors --
+            # but they do not coexist with the peak, which sits inside a backbone attention
+            # block's recompute. Kept for configs where the head is larger relative to the
+            # backbone (a PerceiverDecoder, more out_chans, or fewer checkpointed layers).
+            # Measure before enabling it; the recompute is not free.
+            #
+            # use_reentrant=False matches the backbone's checkpoint calls in spectformer.py
+            # and helio_spectformer.py.  Do not mix the two flavours: the reentrant variant
+            # does not tolerate a checkpointed region whose inputs do not require grad,
+            # which is exactly the case here under a frozen backbone.
+            return checkpoint(self.head_unembed, tokens, use_reentrant=False)
         return self.head_unembed(tokens)  # (B, L, D) -> (B, C, H, W)
 
     @classmethod
